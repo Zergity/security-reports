@@ -1,13 +1,6 @@
-# JaredFromSubway MEV Bot Exploit — Investigation Handoff
+# JaredFromSubway MEV Bot Exploit — Forensic Analysis
 
-Continuation file for a forensic analysis started in a Claude.ai chat. The chat
-environment was network-sandboxed (could not reach Ethereum RPCs or Etherscan),
-which is why several steps are left as "run locally." Claude Code runs on the
-user's machine and **can** reach those endpoints — so the open items below are
-now executable.
-
-Goal: reconstruct exactly how the attacker tricked the bot, and answer one
-remaining question (is the block-arm flag load-bearing or vestigial?).
+Forensic analysis of the JaredFromSubway MEV bot drain. Goal: reconstruct how the attacker tricked the bot, and determine whether the block-arm flag is load-bearing or vestigial. All findings below are verified on-chain.
 
 ---
 
@@ -29,9 +22,9 @@ attacker ignored it and kept laundering.
 
 ---
 
-## ✅ RESOLUTION — local on-chain analysis (run 2026-06-24, Claude Code)
+## Resolution — on-chain analysis (2026-06-24)
 
-Both open questions are now SETTLED with hard evidence. Method: re-extracted all 66
+Both open questions are settled with hard evidence. Method: re-extracted all 66
 children from the sweep calldata; ran `debug_traceTransaction`(callTracer) on the sweep
 and on the bot's conditioning tx (RPC `eth.drpc.org`); pulled the full victim→child
 `Approval`/`Transfer` history via full-range `getLogs` (RPC `rpc.mevblocker.io`, which
@@ -39,7 +32,7 @@ permits unbounded ranges + 66-address topic-OR); replayed every child's allowanc
 read source + creation records via Etherscan. Every figure below reconciles to the wei.
 
 ### Answer to Q#1 — the arm flag is LOAD-BEARING for conditioning, VESTIGIAL for the sweep
-The user's instinct was correct *for the realized theft*, and we also positively located
+The earlier hypothesis holds *for the realized theft*, and this analysis also locates
 where the flag IS load-bearing:
 - **Sweep (`0x2be8…3e65`) = vestigial.** Whole call tree = `1× c269a509 → 66× child
   51cff8d9 → {balanceOf, allowance, conditional transferFrom}`. `4e69d560` and `086f6f56`
@@ -168,8 +161,8 @@ builder tips to enable a ~$15M theft.
   WETH `0xa2c9d0a1…`@25360689 (16 grants), USDC `0xf570bdf2…`@25360599 (20), USDT
   `0x51a1aafa…`@25360667 (20).
 - **Allowance-replay vs receipt (reconciles exactly):**
-  - WETH: 16 × 92.161407687812186112 = **1,474.582523 WETH** ✅ (allowance-bound; victim held ~1,965 WETH > Σallowances).
-  - USDC: 20 × 143,528.656384 = **2,870,573.127680 USDC** ✅ (allowance-bound).
+  - WETH: 16 × 92.161407687812186112 = **1,474.582523 WETH** (allowance-bound; victim held ~1,965 WETH > Σallowances).
+  - USDC: 20 × 143,528.656384 = **2,870,573.127680 USDC** (allowance-bound).
   - USDT: 20 ceiling allowances were armed (Σ = 2,989,761.034240) but the theft was
     **BALANCE-constrained** — victim held only **2,035,760.155871 USDT**. The sweep loop pulled
     `min(allowance, runningBalance)`: 13 full × 149,488.051712 + 1 partial of **92,415.483615**
@@ -208,9 +201,8 @@ builder tips to enable a ~$15M theft.
 | Real tokens drained | WETH `0xC02aaa39b223FE8D0A0e5C4F27eAD9083C756Cc2`, USDC `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`, USDT `0xdAC17F958D2ee523a2206206994597C13D831ec7` |
 
 ### The 66 child wrapper contracts (callees in the sweep array)
-NOTE: only the first 10 were transcribed in-chat. **Re-extract all 66** locally
-from the sweep tx calldata (see commands below) — do not trust a partial list.
-First 10 seen:
+NOTE: only the first 10 are listed here; all 66 were re-extracted from the sweep tx
+calldata and reconcile. First 10:
 ```
 0x68ca6a0c6db92bf2d4424c7c9fba8655992187c6
 0x4ee0b6e9f9c4886beeef2ebd7fc27223169531ce   <- reporting named this one as holding a ~92 WETH allowance until the sweep
@@ -265,7 +257,7 @@ First 10 seen:
 of its own `transferFrom`. The orchestrator has zero allowance itself; it must
 reach into each child and trigger it. Hence the 66-way loop.
 
-### Why "block.number == armedBlock" (the clever part)
+### Why "block.number == armedBlock"
 It's a **simulation-vs-execution divergence primitive**. A bot simulates its
 bundle at a different block (pending/N) where `4e69d560` returns false → child
 looks benign → bot's profit check passes → bot fires. At real inclusion the
@@ -292,7 +284,7 @@ detection, not reentrancy-forced approve, not a persistent manually-flipped flag
 
 ---
 
-## OPEN QUESTION #1 — is the arm flag load-bearing?  → ✅ RESOLVED (see RESOLUTION section above)
+## Open question #1 — is the arm flag load-bearing?  → RESOLVED (see Resolution section above)
 **Verdict: load-bearing for the CONDITIONING phase, vestigial for the SWEEP.** The sweep
 trace has zero `4e69d560`/`086f6f56`; the bot's conditioning tx `0xa2c9d0a1…` hits
 `4e69d560` 32× (all `true`) with the attacker arming at idx 0 of the same block. Details +
@@ -309,7 +301,7 @@ not appear to read).
 **DECIDING EVIDENCE:** does the SWEEP BLOCK contain bot `wrap` txs hitting the
 armed branch before the sweep? Trace the sweep tx call tree:
 ```bash
-# pick an RPC you can reach (these are reachable locally, were NOT in the sandbox)
+# pick an RPC you can reach
 RPC=https://rpc.flashbots.net      # or https://eth.drpc.org, https://eth.llamarpc.com
 cast run 0x2be8704f5a59b69e0b71f64aefdb99eb0e8ae9fb3926147c581910d71bcf3e65 --rpc-url $RPC --quick
 # or raw:
@@ -328,7 +320,7 @@ cast storage 0x68ca6a0c6db92bf2d4424c7c9fba8655992187c6 10 --block <PRE_SWEEP_BL
 
 ---
 
-## OPEN QUESTION #2 — the accrual curve  → ✅ RESOLVED (see RESOLUTION section above)
+## Open question #2 — the accrual curve  → RESOLVED (see Resolution section above)
 **Captured in full.** Conditioning ran blocks 25354425–25360695 (~21 h, ending at the sweep
 block 25360696), NOT in the guessed 25,360,696–25,385,112 window — that window is *entirely
 post-sweep* (the sweep is the FIRST tx of block 25360696), which is why it only showed
@@ -336,7 +328,7 @@ cleanup. Full replay reconciles to the wei (WETH/USDC allowance-bound; USDT bala
 Why the old guess failed is preserved below.
 
 We never captured the real conditioning approvals. A pull over blocks
-25,360,696–25,385,112 (the user's guessed CAMPAIGN_START) returned only
+25,360,696–25,385,112 (an earlier guessed CAMPAIGN_START) returned only
 POST-exploit activity (June 22–24): 357 zero-value revocations + 174 max
 approvals + ~77 small trades, 0 to the 66 children, 0 at the 92.16 ceiling.
 => Wrong era. The conditioning happened BEFORE that window.
@@ -372,14 +364,7 @@ curl -s "https://api.etherscan.io/v2/api?chainid=1&module=contract&action=getcon
 
 ---
 
-## First prompt to give Claude Code
-"Read JARED_INVESTIGATION.md. First re-extract all 66 child addresses from the
-sweep tx calldata. Then run the sweep-tx call trace (Open Question #1) to decide
-whether the block-arm flag was load-bearing or vestigial, and pull the child-
-pinned Approval history (Open Question #2) to build the accrual curve. Use an RPC
-you can reach locally. Report findings and update this file."
-
-## Confidence notes (carry these forward honestly)
+## Confidence notes
 - Addresses, the 92.16×16 reconciliation, slot10→coordinator, and
   `4e69d560 = (block.number == slot1)` are READ FROM bytecode/logs — solid.
 - **NOW PROVEN (was inference):** the flag is a sim-divergence guard — the bot's
@@ -404,19 +389,18 @@ you can reach locally. Report findings and update this file."
   determinant is intra-block ordering — the arm tx must front-run the bot's wrap tx (arm at
   idx 0 vs bot at idx 2 in the dangling block; arm at idx 58 vs bot at idx 5 in a block that
   consumed). No residual inference remains on this point.
-- Scratchpad artifacts (this session): `analyze.py`, `grants_*.json`, `consume_*.json`,
-  `trace_eth.drpc.org.json`, `trace_arm_weth.json`, `children.txt`, `creations.txt`.
+- Reconciliation figures below were produced from full `Approval`/`Transfer` log replay and per-child allowance re-execution.
 
 ---
 
-## 🧵 X thread — the attack in 5 steps (shareable narrative)
+## X thread — the attack in 5 steps (shareable narrative)
 
 > All facts below are reconstructed on-chain; numbers reconcile to the wei. Where the public
 > narrative and our measurements differ, the measured figure is used and noted.
 
 **1/** JaredFromSubway — the most active sandwich bot on Ethereum — was drained ~$15M on
 Jun 20 2026. Not a leaked key. Not a contract bug. A counter-MEV **honeypot** that turned the
-bot's own safety machinery against it. Here's the play, step by step. 👇
+bot's own safety machinery against it. Here's the play, step by step.
 
 **2/** Setup = patience. The attacker deployed 66 fake "Few"-style wrapper tokens (22 each for
 WETH/USDC/USDT) that act like *real* wrappers. The bot routed through them, did real
