@@ -192,6 +192,85 @@ Wallet B `0.0.683607` executed the same exploit for ~$1M and publicly framed its
 
 **Broader lesson.** A signature check is only as strong as its input validation. The BN254 pairing precompile was correct, the lending pool was correct, the off-chain oracle network was intact — and the system still lost ~$9M, because one verifier treated "no committee, no signature" as "valid committee, valid signature." Verifiers must reject the identity element and unregistered keys before they ever reach the math.
 
+### 6.1 Code-level remedy
+
+> Provenance: Supra did not open-source the verifier internals, and the deployed implementation behind `0.0.4323006` (impl `0.0.10414935`) is not source-verified (checked against Sourcify for Hedera chain 295 and the mirror-node bytecode on 2026-07-13 — only unverified runtime bytecode is available; the public docs expose only the *consumer* interface `ISupraOraclePull.verifyOracleProof`, which is not where the defect lives). The snippets below are therefore a **faithful reconstruction, not verbatim deployed source**: the bug and the fix are exact — anchored in the decoded payload (§3.3: committee ID `2`, signature `[0,0]`), the on-chain call graph (§3.4: verifier → `0x02` SHA-256 → `0x06` bn256-add → `0x08` bn256-pairing, all returning success), and Supra's own writeup — while the surrounding names/types are the standard BN254 / EIP-197 idiom.
+
+**The vulnerable path.** An unknown committee yields a zero-initialized key (the point at infinity), and the verifier pairs it against an attacker-supplied zero signature without rejecting either:
+
+```solidity
+struct G1Point { uint256 x; uint256 y; }              // signature, H(m)  — over F_p
+struct G2Point { uint256[2] x; uint256[2] y; }        // committee pubkey — over F_p²
+
+mapping(uint256 => G2Point) internal committeePubKey; // committeeId => aggregate BLS key
+
+function _verifyCommitteeSig(
+    uint256 committeeId,      // payload word 4  = 2  (unpopulated)
+    bytes32 msgHash,          // payload word 5  = 0xd4e6…3f7f
+    G1Point memory sig        // payload words 6,7 = (0, 0)
+) internal view returns (bool) {
+
+    // ── BUG 1 ─ unknown committee returns a ZERO-initialized G2Point (point at infinity),
+    //            instead of reverting. Mapping default = all-zero struct.
+    G2Point memory pk = committeePubKey[committeeId];   // committee 2 → (0,0,0,0)
+
+    G1Point memory hm = _hashToG1(msgHash);
+
+    // ── BUG 2 ─ no identity-element rejection, no on-curve / subgroup check.
+    //            Pairing check  e(sig, g2) == e(hm, pk), evaluated via 0x08 as
+    //            e(sig, g2) · e(-hm, pk) == 1.
+    return _pairingCheck(sig, G2_GENERATOR, _neg(hm), pk);
+    //  with sig = O and pk = O:  e(O,g2)=1  and  e(-hm,O)=1  ⇒  1·1 == 1  ⇒  TRUE
+    //  …for ANY msgHash and ANY price. The signature is decorative.
+}
+```
+
+The pairing precompile is not at fault — EIP-197 defines a pairing involving the point at infinity as the identity in the target group, so `0x08` correctly returns `1`. The fault is that the verifier handed it two identity-element operands it should have rejected first.
+
+**The fix — the three guards Supra added:**
+
+```solidity
+function _verifyCommitteeSig(
+    uint256 committeeId,
+    bytes32 msgHash,
+    G1Point memory sig
+) internal view returns (bool) {
+
+    // ── FIX 1 ─ committee-range / key-presence: fail closed on unregistered committees.
+    require(committeeId < committeeCount && _isRegistered(committeeId), "unknown committee");
+    G2Point memory pk = committeePubKey[committeeId];
+
+    // ── FIX 2 ─ identity-element (point-at-infinity) rejection for BOTH operands.
+    //            Supra: this check alone would have prevented the attack.
+    require(!_isInfinityG1(sig), "sig is identity");
+    require(!_isInfinityG2(pk),  "pubkey is identity");
+
+    // ── FIX 3 ─ on-curve + prime-order subgroup validation before pairing.
+    require(_isOnCurveG1(sig), "sig not on curve");                 // G1 cofactor = 1 ⇒ on-curve ⇒ in-subgroup
+    require(_isOnCurveG2(pk) && _inSubgroupG2(pk), "pk not in G2"); // G2 cofactor ≠ 1 ⇒ explicit subgroup check needed
+
+    G1Point memory hm = _hashToG1(msgHash);
+    return _pairingCheck(sig, G2_GENERATOR, _neg(hm), pk);
+}
+
+function _isInfinityG1(G1Point memory p) internal pure returns (bool) {
+    return p.x == 0 && p.y == 0;
+}
+function _isInfinityG2(G2Point memory p) internal pure returns (bool) {
+    return p.x[0] == 0 && p.x[1] == 0 && p.y[0] == 0 && p.y[1] == 0;
+}
+```
+
+Each guard maps to one of Supra's three stated validation layers:
+
+| Guard | Supra's layer | Why it stops the attack |
+|---|---|---|
+| `FIX 1` | committee-range validation | committee `2` had no key → reverts instead of yielding `pk = O` |
+| `FIX 2` | identity-element rejection | `sig = [0,0]` (and `pk = O`) rejected → the `1 == 1` collapse is unreachable |
+| `FIX 3` | on-curve / subgroup validation | blocks the wider class of malleable/degenerate points (off-curve, small-subgroup) |
+
+Either `FIX 1` or `FIX 2` is individually sufficient for *this* attack — a satisfiable `1 == 1` requires **both** operands to be the identity, and each guard removes one. `FIX 3` closes the remaining invalid-point surface. Note the placement: this belongs in the verifier's `pk`/`sig` intake (behind `0.0.4323006`), **not** in `ISupraOraclePull` and **not** in Bonzo. Bonzo's own hardening — a price-sanity bound on thin feeds like SAUCE (§6) — is a damage cap, not the root-cause fix.
+
 ---
 
 ## 7. Indicators (addresses & identifiers)
