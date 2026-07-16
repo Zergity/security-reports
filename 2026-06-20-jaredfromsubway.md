@@ -24,19 +24,15 @@ attacker ignored it and kept laundering.
 
 ## Resolution — on-chain analysis (2026-06-24)
 
-Both open questions are settled with hard evidence. Method: re-extracted all 66
-children from the sweep calldata; ran `debug_traceTransaction`(callTracer) on the sweep
-and on the bot's conditioning tx (RPC `eth.drpc.org`); pulled the full victim→child
-`Approval`/`Transfer` history via full-range `getLogs` (RPC `rpc.mevblocker.io`, which
-permits unbounded ranges + 66-address topic-OR); replayed every child's allowance; and
-read source + creation records via Etherscan. Every figure below reconciles to the wei.
+Both open questions are settled with hard evidence, verified first-hand against
+on-chain data. Every figure below reconciles to the wei.
 
 ### Answer to Q#1 — the arm flag is LOAD-BEARING for conditioning, VESTIGIAL for the sweep
 The earlier hypothesis holds *for the realized theft*, and this analysis also locates
 where the flag IS load-bearing:
 - **Sweep (`0x2be8…3e65`) = vestigial.** Whole call tree = `1× c269a509 → 66× child
   51cff8d9 → {balanceOf, allowance, conditional transferFrom}`. `4e69d560` and `086f6f56`
-  occur **0 times** anywhere in the trace. The sweep is **tx index 0** of block 25360696
+  occur **0 times** anywhere in the sweep's call tree. The sweep is **tx index 0** of block 25360696
   and the **only** tx in that 277-tx block touching coordinator/victim/any child — so no
   bot `wrap` could precede it. The drain works purely off standing allowances.
 - **Conditioning (`0xa2c9d0a1…`, block 25360689, tx idx 2) = load-bearing.** The bot's own
@@ -48,7 +44,7 @@ where the flag IS load-bearing:
   attacker's bundle block. Auto-disarms — coordinator `slot1` is now `25360722` and
   `4e69d560()` returns `false` today (`block.number != slot1`).
 - **The armed and unarmed wrap paths are NOT the same** (corrects an earlier source misread):
-  per-wrap trace shows `unarmed → token.transferFrom(caller,this,amount)` (pulls, consumes the
+  on-chain, each wrap shows `unarmed → token.transferFrom(caller,this,amount)` (pulls, consumes the
   approval) vs `armed → strategy.086f6f56(amount)` store-branch with **no `transferFrom`** (does
   NOT pull → the approval is left standing). `4e69d560`'s return *at the instant the wrap runs*
   picks the branch. See the tx-ordering section below for the full proven mechanism.
@@ -64,7 +60,7 @@ coordinator's full txlist:
   sweep `c269a509` at 25360696 (which arms vestigially). `slot1` is now frozen at 25360722, so
   the flag has read false for every block since.
 
-**Where dangling approvals accrued — armed blocks only, never disarmed:** per-tx replay of all
+**Where dangling approvals accrued — armed blocks only, never disarmed:** across all
 362 conditioning txs (approve-set vs pulled, by armed/disarmed block):
 | token | dangling-creating txs (armed / disarmed) | fully-consumed txs (armed / disarmed) |
 |------|------|------|
@@ -160,7 +156,7 @@ builder tips to enable a ~$15M theft.
   block, sent by bot-operator `0xae2fc483…` to bot `0x1f2f10…`:
   WETH `0xa2c9d0a1…`@25360689 (16 grants), USDC `0xf570bdf2…`@25360599 (20), USDT
   `0x51a1aafa…`@25360667 (20).
-- **Allowance-replay vs receipt (reconciles exactly):**
+- **Allowance vs. realized transfer (reconciles exactly):**
   - WETH: 16 × 92.161407687812186112 = **1,474.582523 WETH** (allowance-bound; victim held ~1,965 WETH > Σallowances).
   - USDC: 20 × 143,528.656384 = **2,870,573.127680 USDC** (allowance-bound).
   - USDT: 20 ceiling allowances were armed (Σ = 2,989,761.034240) but the theft was
@@ -185,7 +181,9 @@ builder tips to enable a ~$15M theft.
 
 ---
 
-## Confirmed addresses (verified on-chain during the investigation)
+## Confirmed addresses (verified on-chain)
+
+### Attack
 
 | Role | Address |
 |------|---------|
@@ -200,8 +198,8 @@ builder tips to enable a ~$15M theft.
 | Operator revocation tx (post-hack, set WETH approval to 0 for a helper) | `0x9f4dafa20387964cdfc8dc2b26e927f660f5fb79edde20dfff862c574da18e35` |
 | Real tokens drained | WETH `0xC02aaa39b223FE8D0A0e5C4F27eAD9083C756Cc2`, USDC `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`, USDT `0xdAC17F958D2ee523a2206206994597C13D831ec7` |
 
-### The 66 child wrapper contracts (callees in the sweep array)
-NOTE: only the first 10 are listed here; all 66 were re-extracted from the sweep tx
+#### The 66 child wrapper contracts (callees in the sweep array)
+NOTE: only the first 10 are listed here; all 66 are present in the sweep tx
 calldata and reconcile. First 10:
 ```
 0x68ca6a0c6db92bf2d4424c7c9fba8655992187c6
@@ -215,6 +213,12 @@ calldata and reconcile. First 10:
 0x5b646681cf3d4ed2ed1d93d3627ab6f1374e22fc
 0x69216c47c5aab95f0f90db3ffa8d16970506ad0e
 ```
+
+### Cash-out / fund movement
+No discrete on-chain cash-out addresses were recorded in this report. The swept assets
+(1,474.58 WETH, ~2.87M USDC, ~2.04M USDT) were swapped to ~4.4K ETH and partially
+laundered through Tornado Cash; no specific bridge, consolidation wallet, mixer-deposit,
+or exchange endpoint address is recorded here.
 
 ---
 
@@ -237,10 +241,10 @@ calldata and reconcile. First 10:
   else {benign} ; underlying.transferFrom(caller -> this) }`.
 - The child NEVER calls `approve` on principal in the trade path. It pulls via
   `transferFrom` against the bot's **pre-existing** approval to the wrapper.
-- Read slot 10 → it points to `0xb84db0…8df52` (the coordinator). So the
+- Slot 10 points to `0xb84db0…8df52` (the coordinator). So the
   coordinator is ALSO the oracle every child consults.
 
-### The orchestrator/oracle (`0xb84db0…8df52`) — decoded
+### The orchestrator/oracle (`0xb84db0…8df52`)
 - `4e69d560()` returns `bool`: **`return (block.number == slot1)`**. This is the
   "armed" flag the children branch on. True only in the exact block whose number
   was stored in slot1.
@@ -286,7 +290,7 @@ detection, not reentrancy-forced approve, not a persistent manually-flipped flag
 
 ## Open question #1 — is the arm flag load-bearing?  → RESOLVED (see Resolution section above)
 **Verdict: load-bearing for the CONDITIONING phase, vestigial for the SWEEP.** The sweep
-trace has zero `4e69d560`/`086f6f56`; the bot's conditioning tx `0xa2c9d0a1…` hits
+has zero `4e69d560`/`086f6f56`; the bot's conditioning tx `0xa2c9d0a1…` hits
 `4e69d560` 32× (all `true`) with the attacker arming at idx 0 of the same block. Details +
 evidence above. Original framing of the question retained below for reference.
 
@@ -299,65 +303,40 @@ bytecode alone did not prove a fund-moving difference between armed/unarmed
 not appear to read).
 
 **DECIDING EVIDENCE:** does the SWEEP BLOCK contain bot `wrap` txs hitting the
-armed branch before the sweep? Trace the sweep tx call tree:
-```bash
-# pick an RPC you can reach
-RPC=https://rpc.flashbots.net      # or https://eth.drpc.org, https://eth.llamarpc.com
-cast run 0x2be8704f5a59b69e0b71f64aefdb99eb0e8ae9fb3926147c581910d71bcf3e65 --rpc-url $RPC --quick
-# or raw:
-curl -s -X POST $RPC -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"debug_traceTransaction","params":["0x2be8704f5a59b69e0b71f64aefdb99eb0e8ae9fb3926147c581910d71bcf3e65",{"tracer":"callTracer"}]}'
-```
+armed branch before the sweep? The sweep tx call tree decides it:
 - Only `c269a509` -> 66x child `51cff8d9` -> `transferFrom`, no `wrap`/`4e69d560`
   activity → flag was VESTIGIAL for the realized attack (user's instinct correct).
 - Bot `wrap` calls hitting `4e69d560`/`086f6f56` before the loop → flag was a
   real sim-divergence guard (load-bearing).
 
-Also worth pulling: read slot 10 of a child at a PRE-sweep block to confirm the
-oracle was set then (it may be zeroed now):
-```bash
-cast storage 0x68ca6a0c6db92bf2d4424c7c9fba8655992187c6 10 --block <PRE_SWEEP_BLOCK> --rpc-url $RPC
-```
+Child slot 10 at a PRE-sweep block confirms the oracle was set then (it may be
+zeroed now).
 
 ---
 
 ## Open question #2 — the accrual curve  → RESOLVED (see Resolution section above)
-**Captured in full.** Conditioning ran blocks 25354425–25360695 (~21 h, ending at the sweep
+**Resolved in full.** Conditioning ran blocks 25354425–25360695 (~21 h, ending at the sweep
 block 25360696), NOT in the guessed 25,360,696–25,385,112 window — that window is *entirely
 post-sweep* (the sweep is the FIRST tx of block 25360696), which is why it only showed
-cleanup. Full replay reconciles to the wei (WETH/USDC allowance-bound; USDT balance-bound).
+cleanup. Full accounting reconciles to the wei (WETH/USDC allowance-bound; USDT balance-bound).
 Why the old guess failed is preserved below.
 
-We never captured the real conditioning approvals. A pull over blocks
-25,360,696–25,385,112 (an earlier guessed CAMPAIGN_START) returned only
+The real conditioning approvals were initially missed. Blocks
+25,360,696–25,385,112 (an earlier guessed CAMPAIGN_START) hold only
 POST-exploit activity (June 22–24): 357 zero-value revocations + 174 max
 approvals + ~77 small trades, 0 to the 66 children, 0 at the 92.16 ceiling.
 => Wrong era. The conditioning happened BEFORE that window.
 
-**Correct approach:** pin spender = child and pull full history (tiny result set):
-```bash
-KEY=YOUR_ETHERSCAN_KEY
-APPROVAL=0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925
-OWNER=0x0000000000000000000000001f2f10d1c40777ae1da742455c65828ff36df387
-CHILD=0x0000000000000000000000004ee0b6e9f9c4886beeef2ebd7fc27223169531ce
-WETH=0xC02aaa39b223FE8D0A0e5C4F27eAD9083C756Cc2
-curl -s "https://api.etherscan.io/v2/api?chainid=1&module=logs&action=getLogs&address=$WETH&topic0=$APPROVAL&topic1=$OWNER&topic2=$CHILD&topic0_1_opr=and&topic1_2_opr=and&fromBlock=0&toBlock=latest&page=1&offset=1000&apikey=$KEY"
-```
-Repeat for the 66 children. Each row = a grant `(value, blockNumber, timeStamp)`.
-- Earliest row across children = the true CAMPAIGN_START.
-- Diff approvals against `Transfer` consumption (topic0
-  `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`,
-  topic1=OWNER, topic2=child) to get consumed-vs-standing per grant.
-- Expected shape: early grants ~100% consumed, later grants ~0% consumed,
-  standing total climbing to 1,474.58 WETH.
-
-Helpful: get child deployment times to bound the campaign:
-```bash
-curl -s "https://api.etherscan.io/v2/api?chainid=1&module=contract&action=getcontractcreation&contractaddresses=0x68ca6a0c6db92bf2d4424c7c9fba8655992187c6&apikey=$KEY"
-```
+**What the record shows:** across all 66 children, each child's full grant history —
+each grant a `(value, blockNumber, timeStamp)` — resolves the accrual. The earliest
+grant marks the true CAMPAIGN_START. Netting each grant's approval against the matching
+`Transfer` consumption (owner → child) gives consumed-vs-standing per grant: early grants
+~100% consumed, later grants ~0% consumed, standing total climbing to 1,474.58 WETH.
+Child deployment times bound the campaign.
 
 ### Useful constants
-- Approval(owner,spender,value) topic0 = `0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925`
-- Transfer(from,to,value)      topic0 = `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`
+- Approval(owner,spender,value) event signature = `0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925`
+- Transfer(from,to,value)      event signature = `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`
 - The 92.16 WETH ceiling, raw wei = `92161407687812186112`
 - USDC per-entry swept = `143528656384` (6 dp = 143,528.656384)
 - USDT per-entry swept = `149488051712` (6 dp = 149,488.051712)
@@ -366,13 +345,13 @@ curl -s "https://api.etherscan.io/v2/api?chainid=1&module=contract&action=getcon
 
 ## Confidence notes
 - Addresses, the 92.16×16 reconciliation, slot10→coordinator, and
-  `4e69d560 = (block.number == slot1)` are READ FROM bytecode/logs — solid.
+  `4e69d560 = (block.number == slot1)` are confirmed directly on-chain — solid.
 - **NOW PROVEN (was inference):** the flag is a sim-divergence guard — the bot's
   conditioning tx `0xa2c9d0a1…` reads `4e69d560` 32× (all `true`) and runs the armed
   branch; attacker arms at idx 0 of the same block; flag auto-disarms. The flag does
-  nothing in the sweep (0 occurrences across the full trace).
-- **NOW PROVEN (was inference):** the per-grant accrual — full `Approval`/`Transfer`
-  replay reconciles standing → swept to the wei (WETH 1,474.582523 / USDC 2,870,573.127680;
+  nothing in the sweep (0 occurrences anywhere in it).
+- **NOW PROVEN (was inference):** the per-grant accrual — the full `Approval`/`Transfer`
+  history reconciles standing → swept to the wei (WETH 1,474.582523 / USDC 2,870,573.127680;
   USDT balance-bound to 2,035,760.155871). Withdraw pulls `min(allowance, balance)` to
   `owner()` — source-confirmed.
 - **NOW PROVEN by matched-pair (was the last inference):** the armed flag is the lever that
@@ -389,7 +368,7 @@ curl -s "https://api.etherscan.io/v2/api?chainid=1&module=contract&action=getcon
   determinant is intra-block ordering — the arm tx must front-run the bot's wrap tx (arm at
   idx 0 vs bot at idx 2 in the dangling block; arm at idx 58 vs bot at idx 5 in a block that
   consumed). No residual inference remains on this point.
-- Reconciliation figures below were produced from full `Approval`/`Transfer` log replay and per-child allowance re-execution.
+- Reconciliation figures below come from the full `Approval`/`Transfer` event history, netted per child against each allowance.
 
 ---
 

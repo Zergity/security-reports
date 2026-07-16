@@ -8,7 +8,7 @@
 **Chain:** Ethereum mainnet (block 25,471,348, tx index 0)
 **Status:** Summer.fi paused all Lazy Summer Protocol vaults. Attacker swapped the proceeds to DAI in-transaction, then converted DAI→ETH in small tranches over the following day (Uniswap V2). No full public post-mortem from Summer.fi at the time of writing.
 
-> Scope note: This is an internal reference report. The exploit transaction, the flash-loan structure (§3.2), the call sequence (§3.3), the deposit/redeem share prices (§3.4), the per-address value flow (§4), and the laundering path (§5) were reconstructed first-hand from chain data on 2026-07-07 — the transaction receipt and logs, a `debug_traceTransaction` (callTracer) trace, ABI/selector decoding against the verified `FleetCommander` source, and historical `eth_call`s at the block boundaries (Etherscan V2 API, chainid 1; trace via public `debug_` RPC). Those findings are first-hand and reproducible. The root-cause reading (§3.5) is grounded in Summer.fi's own verified `FleetCommander`/`FleetCommanderCache`/`Ark` source. Off-chain context — the ~$6M headline, the "$7.14M inflated Ark" figure, detection by Blockaid/PeckShield/CertiK/GoPlus, and the vault pause — is as reported by public sources and is flagged where it goes beyond what the chain shows. One finding differs from the headline and is called out explicitly: FleetCommander_A's *resting* net asset value was essentially unchanged before and after the transaction (§3.6), so the extracted value came out of the shared underlying lending markets, not the vault's standing balance.
+> Scope note: This is an internal reference report. The exploit transaction, the flash-loan structure (§3.2), the call sequence (§3.3), the deposit/redeem share prices (§3.4), the per-address value flow (§4), and the laundering path (§5) were reconstructed first-hand from on-chain data on 2026-07-07, cross-checked against Summer.fi's verified `FleetCommander` source. Those findings are first-hand and reproducible. The root-cause reading (§3.5) is grounded in Summer.fi's own verified `FleetCommander`/`FleetCommanderCache`/`Ark` source. Off-chain context — the ~$6M headline, the "$7.14M inflated Ark" figure, detection by Blockaid/PeckShield/CertiK/GoPlus, and the vault pause — is as reported by public sources and is flagged where it goes beyond what the chain shows. One finding differs from the headline and is called out explicitly: FleetCommander_A's *resting* net asset value was essentially unchanged before and after the transaction (§3.6), so the extracted value came out of the shared underlying lending markets, not the vault's standing balance.
 
 ---
 
@@ -44,7 +44,7 @@ The exploit used only permissionless user functions (`deposit`, `redeem`/`redeem
 
 ### 3.1 The system
 
-Verified Summer.fi contracts involved (all source-verified on Etherscan):
+Verified Summer.fi contracts involved (all source-verified):
 
 - **`FleetCommander`** — the Lazy Summer vault, an ERC-4626 (`deposit`/`mint`/`withdraw`/`redeem`). Two instances were touched: the primary **FleetCommander_A** `0x98C49e13bf99D7CAd8069faa2A370933EC9EcF17` and **FleetCommander_B** `0xE9cDA459bED6dcfb8AC61CD8cE08E2D52370cB06`. Both use 6-decimal shares over 6-decimal USDC.
 - **Arks** — adapter contracts holding the vault's assets in external venues. Seen here: `BufferArk` (idle-USDC buffer, one per FleetCommander: `0x106cbb…dd2b`, `0xeb60a8…0d9d`), several `MorphoV2VaultArk` (`0xd00c16…400b`, `0x81f025…0b25`, `0xd0aadd…958f`), a `SparkArk` (`0x8948a5…062f`), a `SiloManagedVaultArk` (`0x61d706…76c2`), and an `ERC4626Ark` (`0xfd8993…8519`).
@@ -60,9 +60,9 @@ External protocols the Arks touch, and that the attacker manipulated:
 
 The whole operation is one call from the attacker EOA to the attack contract's `attack(address[])` (selector `0x6624ef70`), passing the list of vaults/arks to hit. Inside, the attack contract calls Morpho Blue's `flashLoan(address,uint256,bytes)` (`0xe0232b42`); Morpho calls back `onMorphoFlashLoan(uint256,bytes)` (`0x31f57072`) on the attack contract, and *all* exploit logic runs inside that callback. A second Morpho `flashLoan` is nested inside the first callback. The outer loan of 65,419,171.88 USDC is repaid in full and at zero fee in the same transaction (Morpho Blue flash loans are free), so the loan nets to zero — it is pure temporary capital.
 
-### 3.3 The call sequence (from the callTracer trace)
+### 3.3 The call sequence
 
-Inside the flash-loan callback, decoded to labeled contracts and selectors:
+Inside the flash-loan callback, with contracts and selectors labeled:
 
 ```
 attack()                                                    // 0x6624ef70
@@ -85,7 +85,7 @@ attack()                                                    // 0x6624ef70
 CurveRouter.exchange  → Curve 3pool  (USDC → DAI, the profit)
 ```
 
-Selectors were confirmed against the verified `FleetCommander` source and 4byte (`board(uint256,bytes)`→`0x2db6d399`, `disembark(uint256,bytes)`→`0x13c408f8`, `deposit(uint256,address)`→`0x6e553f65`, `redeem(uint256,address,address)`→`0xba087652`, `withdrawFromArks(uint256,address,address)`→`0xa039e944`, `withdrawFromBuffer(...)`→`0x5f538f6f`).
+Selectors match the verified `FleetCommander` source (`board(uint256,bytes)`→`0x2db6d399`, `disembark(uint256,bytes)`→`0x13c408f8`, `deposit(uint256,address)`→`0x6e553f65`, `redeem(uint256,address,address)`→`0xba087652`, `withdrawFromArks(uint256,address,address)`→`0xa039e944`, `withdrawFromBuffer(...)`→`0x5f538f6f`).
 
 ### 3.4 The core round-trip — deposit low, redeem high, same transaction
 
@@ -118,7 +118,7 @@ totalAssets() = Σ over arks of Ark.totalAssets()      // FleetCommanderCache._s
 
 ### 3.6 What the chain proves about *where* the money came from
 
-FleetCommander_A queried at the block boundaries (fresh `eth_call`, so no transient cache in play):
+FleetCommander_A's resting state at the block boundaries (no transient cache in play):
 
 | | block 25,471,347 (before) | block 25,471,348 (after) |
 |---|---|---|
@@ -149,7 +149,7 @@ The extracted value was net-withdrawn from the shared underlying lending markets
 
 ## 4. On-chain accounting (independently verified)
 
-> Method: Ethereum via Etherscan V2 API (`chainid=1`) for the transaction, receipt (305 logs), and historical `eth_call`; the call tree via `debug_traceTransaction` (callTracer); contract identities via verified-source lookups; ERC-20 `Transfer` decoding for value flow. Checked 2026-07-07.
+> All figures below are on-chain values from the exploit transaction — its 305 emitted events and the ERC-20 `Transfer` flows across it, with contract identities from their verified source. As of 2026-07-07.
 
 ### 4.1 The USDC round-trip (log order, ≥ $100k)
 
@@ -198,21 +198,31 @@ In-transaction, the ~6.02M USDC profit was swapped to DAI through a Curve router
 
 ## 7. Indicators (addresses & identifiers)
 
-| Role | Address / value |
-|---|---|
-| Exploit transaction | `0x0db528c44f23fc7fa4544684a2fab81096450a14aae8bc89f42cd0592d43da12` |
-| Block | 25,471,348 (tx index 0), 2026-07-06 05:17:59 UTC |
-| Attacker EOA | `0x7BF716167B48CF527725722C6d79494b45B3BDCa` |
-| Attack contract (unverified) | `0x0514F827C129C16418a0933E03C99A6AF982FC61` |
-| FleetCommander_A (primary) | `0x98C49e13bf99D7CAd8069faa2A370933EC9EcF17` |
-| FleetCommander_B | `0xE9cDA459bED6dcfb8AC61CD8cE08E2D52370cB06` |
-| Strategy wrapper | `0xA9ca4909700505585B1ad2a1579DA3b670FFA9c4` |
-| BufferArk_A / _B | `0x106cbb1f445f0bffa7894f4199ee940bf7f6dd2b` / `0xeb60a8e747d73c58ccc320bcdabb166f8a0c0d9d` |
-| MorphoV2VaultArks | `0xd00c168451fddd8ef839e5c0f5b9666143d9400b`, `0x81f025c87367033d87b6d3a95289b36106770b25`, `0xd0aadde147b6d683cbb80bfe0fb9e8db9de1958f` |
-| SparkArk / SiloManagedVaultArk / ERC4626Ark | `0x8948a5f3d24f7a6d50ff36064e8cff33b2af062f` / `0x61d7063041d83c8ca3e42c39181dfd14b3bc76c2` / `0xfd899321b1fd8d75e255119766d9097c98568519` |
-| Morpho market adapters manipulated | `0x9414a42eab4580c042b18def4d37372a7881e001`, `0x1d511811aca9d8817a3e50f29cadff6243a02902`, `0xcc0f95e65d2ce7fb715bfb418bf61314d0878b41` |
-| Flash-loan source | Morpho Blue `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` |
-| Profit swap venues | Curve 3pool `0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7`; Uniswap V2 router `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D` |
+### 7.1 Attack
+
+| Role | Address / value | Controlled by |
+|---|---|---|
+| Exploit transaction | `0x0db528c44f23fc7fa4544684a2fab81096450a14aae8bc89f42cd0592d43da12` | attacker-executed |
+| Block | 25,471,348 (tx index 0), 2026-07-06 05:17:59 UTC | — |
+| Attacker EOA | `0x7BF716167B48CF527725722C6d79494b45B3BDCa` | attacker-exclusive |
+| Attack contract (unverified) | `0x0514F827C129C16418a0933E03C99A6AF982FC61` | attacker-exclusive |
+| FleetCommander_A (primary) | `0x98C49e13bf99D7CAd8069faa2A370933EC9EcF17` | Summer.fi vault (victim) |
+| FleetCommander_B | `0xE9cDA459bED6dcfb8AC61CD8cE08E2D52370cB06` | Summer.fi vault (victim) |
+| Strategy wrapper | `0xA9ca4909700505585B1ad2a1579DA3b670FFA9c4` | third-party wrapper, used as a deposit path |
+| BufferArk_A / _B | `0x106cbb1f445f0bffa7894f4199ee940bf7f6dd2b` / `0xeb60a8e747d73c58ccc320bcdabb166f8a0c0d9d` | Summer.fi Arks (victim) |
+| MorphoV2VaultArks | `0xd00c168451fddd8ef839e5c0f5b9666143d9400b`, `0x81f025c87367033d87b6d3a95289b36106770b25`, `0xd0aadde147b6d683cbb80bfe0fb9e8db9de1958f` | Summer.fi Arks (victim) |
+| SparkArk / SiloManagedVaultArk / ERC4626Ark | `0x8948a5f3d24f7a6d50ff36064e8cff33b2af062f` / `0x61d7063041d83c8ca3e42c39181dfd14b3bc76c2` / `0xfd899321b1fd8d75e255119766d9097c98568519` | Summer.fi Arks (victim) |
+| Morpho market adapters manipulated | `0x9414a42eab4580c042b18def4d37372a7881e001`, `0x1d511811aca9d8817a3e50f29cadff6243a02902`, `0xcc0f95e65d2ce7fb715bfb418bf61314d0878b41` | shared Morpho infrastructure |
+| Flash-loan source | Morpho Blue `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` | shared Morpho infrastructure |
+
+### 7.2 Cash-out / fund movement
+
+| Role | Address / value | Note |
+|---|---|---|
+| In-transaction profit swap (USDC→DAI) | Curve 3pool `0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7` | public AMM, commingled; converted the ~6.02M USDC profit to DAI inside the exploit transaction |
+| DAI→ETH cash-out (next day) | Uniswap V2 router `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D` | public router, commingled; the attacker EOA cashed the ~6M DAI out to ETH in small tranches on 2026-07-07 (01:38–03:47 UTC) |
+
+The proceeds moved back to the same attacker EOA (`0x7BF716…BDCa`) as ETH. No bridge, mixer, consolidation wallet, or exchange deposit endpoint was traced; onward movement past ETH is out of scope.
 
 ## 8. Sources
 

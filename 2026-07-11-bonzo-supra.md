@@ -8,7 +8,7 @@
 **Chain:** Hedera mainnet (consensus timestamp `1783731099.646109213`, block 97,504,678; exploit tx `0xd50c…0a60`)
 **Status:** Supra acknowledged the verifier bug and deployed a fix to the affected contract on Hedera mainnet *(as reported)*. Bonzo paused Lend at 01:41 UTC and Bonzo Points at 05:50 UTC. Of the proceeds, ~$5.25M was bridged to Ethereum via LayerZero and rotated through WBTC into ETH *(attributed to Specter / press)*. No full third-party post-mortem beyond Bonzo's and Supra's own reports at the time of writing.
 
-> Scope note: This is an internal reference report. The exploit transaction and its consensus time (§2), the decoded malicious payload — committee ID, committee hash, zeroed signature, pair 425, and the 10³⁰ price field (§3.3) — the internal EVM call graph through the verifier to the BN254 pairing precompile (§3.4), the 250-SAUCE deposit, the benign warm-up update, both borrow legs and their exact amounts (§4), the attacker account's age and key type, and every contract/token entity ID and EVM address (§7) were read first-hand from Hedera mainnet on 2026-07-13 via the public mirror node (`/api/v1/transactions`, `/contracts/results/{hash}`, `/contracts/results/{hash}/actions`, `/accounts`, `/contracts`, `/tokens`) and by decoding the raw call data. Those findings are first-hand and reproducible. The cryptographic root-cause reading (§3.5) is grounded in Supra's own incident report plus the observed call graph. Off-chain context — the ~$9.05M and ~$1M USD headlines, the HBAR/SAUCE reference prices, the −77% Bonzo / ~−40% Hedera TVL moves, the LayerZero bridge-out and Ethereum-side WBTC→ETH rotation, the white-hat framing of Wallet B, and Supra's deployed fix — is as reported by Bonzo Finance, Supra, CoinDesk, Cointelegraph, and Specter, and is flagged where it goes beyond what the chain shows.
+> Scope note: This is an internal reference report. The exploit transaction and its consensus time (§2), the malicious payload — committee ID, committee hash, zeroed signature, pair 425, and the 10³⁰ price field (§3.3) — the internal EVM call graph through the verifier to the BN254 pairing precompile (§3.4), the 250-SAUCE deposit, the benign warm-up update, both borrow legs and their exact amounts (§4), the attacker account's age and key type, and every contract/token entity ID and EVM address (§7) were verified first-hand against Hedera mainnet on 2026-07-13. Those findings are first-hand and reproducible. The cryptographic root-cause reading (§3.5) is grounded in Supra's own incident report plus the observed call graph. Off-chain context — the ~$9.05M and ~$1M USD headlines, the HBAR/SAUCE reference prices, the −77% Bonzo / ~−40% Hedera TVL moves, the LayerZero bridge-out and Ethereum-side WBTC→ETH rotation, the white-hat framing of Wallet B, and Supra's deployed fix — is as reported by Bonzo Finance, Supra, CoinDesk, Cointelegraph, and Specter, and is flagged where it goes beyond what the chain shows.
 
 ---
 
@@ -47,7 +47,7 @@ The exploit used only permissionless functions: the public pull-oracle update en
 
 ### 3.1 The system
 
-Verified Hedera entities (IDs and EVM addresses read from the mirror node, 2026-07-13):
+Verified Hedera entities (IDs and EVM addresses, confirmed on-chain 2026-07-13):
 
 - **Supra pull-oracle (feed) contract** — `0.0.4323024` / `0x41ab2059baa4b73e9a3f55d30dff27179e0ea181`. The permissionless target of price updates; it delegates to an implementation `0.0.10414936` and calls the verifier before storing a price.
 - **Supra verifier** — `0.0.4323006` (long-zero `0x…41f6be`, aliased `0x2fa6dbfe4291136cf272e1a3294362b6651e8517`), delegating to implementation `0.0.10414935`. This is the contract that checks the committee BLS signature.
@@ -61,9 +61,9 @@ Tokens (all confirmed on-chain): **SAUCE** `0.0.731861` (6 dp), **USDC** `0.0.45
 
 Supra runs a *pull* oracle: prices are not pushed by a privileged keeper but submitted on-chain by anyone, carrying a payload signed off-chain by a Supra oracle **committee**. The on-chain verifier is the entire security boundary — it recomputes the message hash, looks up the referenced committee's aggregate BLS public key, and checks the signature with a BN254 pairing. If that check passes, the price is written and every consumer (here, Bonzo via its adapter) treats it as canonical. There is no second signer, no dispute window, and no per-caller authorization: soundness rests entirely on the verifier rejecting anything that is not a genuine committee signature.
 
-### 3.3 The forged payload (decoded from the raw call data)
+### 3.3 The forged payload
 
-The exploit transaction's input to `0.0.4323024` is 644 bytes: a 4-byte selector `0x03a02dfd` followed by twenty 32-byte words. Decoded, the load-bearing fields are:
+The exploit transaction's input to `0.0.4323024` is 644 bytes: a 4-byte selector `0x03a02dfd` followed by twenty 32-byte words. The load-bearing fields are:
 
 | Word | Value | Meaning |
 |---|---|---|
@@ -79,7 +79,7 @@ So the attacker did not need to forge a signature so much as choose inputs that 
 
 ### 3.4 What the chain proves about the verification path
 
-The mirror node's internal-action trace for `0xd50c…0a60` shows the full EVM call graph, and every frame returned `OUTPUT` (success):
+The full EVM call graph of the exploit transaction `0xd50c…0a60` runs as follows, with every frame returning success:
 
 ```
 Wallet A 0.0.10633526
@@ -124,14 +124,12 @@ Bonzo priced collateral through its Supra adapter for pair 425 (SAUCE denominate
 
 - **Bonzo smart-contract bug:** not involved. Only permissionless `deposit`/`borrow` were called; the pool priced collateral off the oracle price it was handed.
 - **Committee-key compromise / signer theft:** not involved. No real signature was used; the attack works precisely *because* it uses a non-signature (`σ = O`) against a non-key (`pk = O`).
-- **Supra off-chain infrastructure breach:** not involved. Supra's report and the on-chain trace both locate the failure in the on-chain verifier's input validation, not in the off-chain price network.
+- **Supra off-chain infrastructure breach:** not involved. Supra's report and the on-chain call graph both locate the failure in the on-chain verifier's input validation, not in the off-chain price network.
 - **A broken pairing precompile / EVM bug:** ruled out by §3.4 — `0x08` behaved to spec; it was handed degenerate inputs.
 
 ---
 
 ## 4. On-chain accounting (independently verified)
-
-> Method: Hedera mainnet via the public mirror node (`mainnet-public.mirrornode.hedera.com`). Transactions pulled by account and time window; the exploit call decoded from `function_parameters`; the call graph from `/contracts/results/{hash}/actions`; token deltas from `token_transfers`. Checked 2026-07-13.
 
 ### 4.1 The sequence on Wallet A `0.0.10633526`
 
@@ -159,7 +157,7 @@ The USD totals are as reported by Bonzo Finance and CoinDesk on 2026-07-11 and d
 
 ### 4.3 Aftermath on the account
 
-Queried on 2026-07-13, Wallet A holds **0 USDC** and **0 WHBAR** — both borrowed balances were swapped out and moved off Hedera — while retaining ~255.96 SAUCE and ~21,000 HBAR of dust and residue, at ethereum-nonce 94 (≈94 EVM transactions since creation).
+As of 2026-07-13, Wallet A holds **0 USDC** and **0 WHBAR** — both borrowed balances were swapped out and moved off Hedera — while retaining ~255.96 SAUCE and ~21,000 HBAR of dust and residue, at ethereum-nonce 94 (≈94 EVM transactions since creation).
 
 ---
 
@@ -194,7 +192,7 @@ Wallet B `0.0.683607` executed the same exploit for ~$1M and publicly framed its
 
 ### 6.1 Code-level remedy
 
-> Provenance: Supra did not open-source the verifier internals, and the deployed implementation behind `0.0.4323006` (impl `0.0.10414935`) is not source-verified (checked against Sourcify for Hedera chain 295 and the mirror-node bytecode on 2026-07-13 — only unverified runtime bytecode is available; the public docs expose only the *consumer* interface `ISupraOraclePull.verifyOracleProof`, which is not where the defect lives). The snippets below are therefore a **faithful reconstruction, not verbatim deployed source**: the bug and the fix are exact — anchored in the decoded payload (§3.3: committee ID `2`, signature `[0,0]`), the on-chain call graph (§3.4: verifier → `0x02` SHA-256 → `0x06` bn256-add → `0x08` bn256-pairing, all returning success), and Supra's own writeup — while the surrounding names/types are the standard BN254 / EIP-197 idiom.
+> Provenance: Supra did not open-source the verifier internals, and the deployed implementation behind `0.0.4323006` (impl `0.0.10414935`) is not source-verified (as of 2026-07-13 only unverified runtime bytecode is public; the public docs expose only the *consumer* interface `ISupraOraclePull.verifyOracleProof`, which is not where the defect lives). The snippets below are therefore a **faithful reconstruction, not verbatim deployed source**: the bug and the fix are exact — anchored in the payload (§3.3: committee ID `2`, signature `[0,0]`), the on-chain call graph (§3.4: verifier → `0x02` SHA-256 → `0x06` bn256-add → `0x08` bn256-pairing, all returning success), and Supra's own writeup — while the surrounding names/types are the standard BN254 / EIP-197 idiom.
 
 **The vulnerable path.** An unknown committee yields a zero-initialized key (the point at infinity), and the verifier pairs it against an attacker-supplied zero signature without rejecting either:
 
@@ -275,27 +273,36 @@ Either `FIX 1` or `FIX 2` is individually sufficient for *this* attack — a sat
 
 ## 7. Indicators (addresses & identifiers)
 
-| Role | Hedera ID | EVM address |
-|---|---|---|
-| Exploit transaction | `0.0.995584-1783731093-686041919` | `0xd50c55e24eb8483ec55bf74e84fc9853d0f0fe36f64abdb812a2d9afa2a10a60` |
-| Block / consensus time | 97,504,678 | `1783731099.646109213` (2026-07-11 00:51:39 UTC) |
-| Wallet A (attacker) | `0.0.10633526` | `0x9a4966152f6e10b33cb7a37975e8619816d6a494` |
-| Wallet B (white-hat) | `0.0.683607` | `0x00000000000000000000000000000000000a6e57` |
-| Supra pull-oracle (feed) | `0.0.4323024` | `0x41ab2059baa4b73e9a3f55d30dff27179e0ea181` |
-| Supra oracle implementation | `0.0.10414936` | — |
-| Supra verifier | `0.0.4323006` | `0x2fa6dbfe4291136cf272e1a3294362b6651e8517` (long-zero `0x…41f6be`) |
-| Supra verifier implementation | `0.0.10414935` | — |
-| Supra price-store contract | `0.0.4322850` (→ impl `0.0.6814361`) | — |
-| Bonzo `LendingPool` proxy | `0.0.7308459` | `0x236897c518996163E7b313aD21D1C9fCC7BA1afc` |
-| Bonzo Supra-oracle adapter | `0.0.7308480` | `0xc0Bb4030b55093981700559a0B751DCf7Db03cBB` |
-| BN254 pairing precompile | `0.0.8` | `0x08` |
-| BN254 addition precompile | `0.0.6` | `0x06` |
-| SHA-256 precompile | `0.0.2` | `0x02` |
-| SAUCE / USDC / WHBAR | `0.0.731861` / `0.0.456858` / `0.0.1456986` | 6 / 6 / 8 decimals |
-| Egress contracts (bridge/OFT) | `0.0.9470869` / `0.0.9470871` | `0xca367694cdac8f152e33683bb36cc9d6a73f1ef2` / `0xda6087e69c51e7d31b6dbad276a3c44703dfdcad` |
-| Committee hash in payload | — | `0xd4e6b48aef731cc8cd74b25fbaec267ff8a6269aea1f4be4ee19dda5ecbf3f7f` |
-| Pull-oracle update selector | — | `0x03a02dfd` |
-| Ethereum-side theft addresses *(reported)* | — | `0x9a49…6a494`, `0xaf2…6dD93e` |
+### 7.1 Attack
+
+Attacker-exclusive rows are Wallet A, the exploit transaction, and the attacker-chosen payload fields. Rows marked *shared* are protocol/system infrastructure that ordinary users — and the second actor in §7.2 — also transact against.
+
+| Role | Hedera ID | EVM address | Class |
+|---|---|---|---|
+| Exploit transaction | `0.0.995584-1783731093-686041919` | `0xd50c55e24eb8483ec55bf74e84fc9853d0f0fe36f64abdb812a2d9afa2a10a60` | attacker-exclusive |
+| Block / consensus time | 97,504,678 | `1783731099.646109213` (2026-07-11 00:51:39 UTC) | attacker-exclusive (exploit block) |
+| Wallet A (attacker) | `0.0.10633526` | `0x9a4966152f6e10b33cb7a37975e8619816d6a494` | attacker-exclusive |
+| Supra pull-oracle (feed) | `0.0.4323024` | `0x41ab2059baa4b73e9a3f55d30dff27179e0ea181` | shared |
+| Supra oracle implementation | `0.0.10414936` | — | shared |
+| Supra verifier | `0.0.4323006` | `0x2fa6dbfe4291136cf272e1a3294362b6651e8517` (long-zero `0x…41f6be`) | shared |
+| Supra verifier implementation | `0.0.10414935` | — | shared |
+| Supra price-store contract | `0.0.4322850` (→ impl `0.0.6814361`) | — | shared |
+| Bonzo `LendingPool` proxy | `0.0.7308459` | `0x236897c518996163E7b313aD21D1C9fCC7BA1afc` | shared |
+| Bonzo Supra-oracle adapter | `0.0.7308480` | `0xc0Bb4030b55093981700559a0B751DCf7Db03cBB` | shared |
+| BN254 pairing precompile | `0.0.8` | `0x08` | shared |
+| BN254 addition precompile | `0.0.6` | `0x06` | shared |
+| SHA-256 precompile | `0.0.2` | `0x02` | shared |
+| SAUCE / USDC / WHBAR | `0.0.731861` / `0.0.456858` / `0.0.1456986` | 6 / 6 / 8 decimals | shared |
+| Committee hash in payload | — | `0xd4e6b48aef731cc8cd74b25fbaec267ff8a6269aea1f4be4ee19dda5ecbf3f7f` | attacker-chosen |
+| Pull-oracle update selector | — | `0x03a02dfd` | shared (public entrypoint) |
+
+### 7.2 Cash-out / fund movement
+
+| Role | Hedera ID | EVM address | Class |
+|---|---|---|---|
+| Wallet B (white-hat) | `0.0.683607` | `0x00000000000000000000000000000000000a6e57` | second actor, ~$1M *(as reported)* |
+| Egress contracts (bridge/OFT) | `0.0.9470869` / `0.0.9470871` | `0xca367694cdac8f152e33683bb36cc9d6a73f1ef2` / `0xda6087e69c51e7d31b6dbad276a3c44703dfdcad` | Wallet A fund movement |
+| Ethereum-side theft addresses *(reported)* | — | `0x9a49…6a494`, `0xaf2…6dD93e` | Wallet A fund movement *(reported)* |
 
 ## 8. Sources
 
@@ -313,4 +320,4 @@ Public reporting (figures and attribution as reported; re-verify before external
 - Hedera (X), 2026-07-11 — Supra acknowledgement and deployed fix: https://x.com/hedera/status/2075986869569884353
 - Specter (on-chain tracing, via press) — LayerZero bridge-out and Ethereum-side WBTC→ETH rotation; Ethereum theft addresses.
 
-All Hedera on-chain figures in §2–§4 and §7 were verified first-hand against Hedera mainnet via the public mirror node on 2026-07-13.
+All Hedera on-chain figures in §2–§4 and §7 were verified first-hand against Hedera mainnet on 2026-07-13.
